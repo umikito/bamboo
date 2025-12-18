@@ -1,0 +1,129 @@
+import requests
+
+taxonKey = 3073  # 查询数据量
+url = f"https://api.gbif.org/v1/occurrence/search?taxonKey={taxonKey}&hasCoordinate=true&limit=0"
+data = requests.get(url).json()
+
+print("Bambusoideae（竹亚科）有坐标记录数 =", data["count"])
+
+import requests
+import time
+
+#调用api下载获取下载权限，一次只能获取三个
+USERNAME = "ukito"
+PASSWORD = "Applesun000"
+CREATOR  = "ukito"   # 必须与 USERNAME 完全一致
+
+# 洲别映射
+continents = {
+    
+    "NORTH_AMERICA": "NorthAmerica",
+    "SOUTH_AMERICA": "SouthAmerica"
+}
+
+url = "https://api.gbif.org/v1/occurrence/download/request"
+
+download_keys = {}
+
+for continent_key, continent_name in continents.items():
+    download_request = {
+        "creator": CREATOR,
+        "notificationAddresses": [],
+        "format": "DWCA",
+        "predicate": {
+            "type": "and",
+            "predicates": [
+                {
+                    "type": "greaterThanOrEquals",
+                    "key": "YEAR",
+                    "value": 2015
+                },
+                {
+                    "type": "lessThanOrEquals",
+                    "key": "YEAR",
+                    "value": 2022
+                },
+                {
+                    "type": "equals",
+                    "key": "TAXON_KEY",
+                    "value": 3073   # Bambusoideae
+                },
+                {
+                    "type": "equals",
+                    "key": "HAS_COORDINATE",
+                    "value": True
+                },
+                {
+                    "type": "equals",
+                    "key": "CONTINENT",
+                    "value": continent_key
+                }
+            ]
+        }
+    }
+
+    print(f"Submitting download request for {continent_name}...")
+
+    r = requests.post(url, json=download_request, auth=(USERNAME, PASSWORD))
+
+    if r.status_code != 201:
+        print(f"❌ Failed for {continent_name}:", r.status_code, r.text)
+        continue
+
+    download_key = r.text.strip()
+    download_keys[continent_name] = download_key
+
+    print(f"✔ {continent_name} submitted successfully!")
+    print("   Download key:", download_key)
+
+    # 避免触发 GBIF API 限流
+    time.sleep(2)
+
+print("\nAll submitted download keys:")
+for k, v in download_keys.items():
+    print(f"{k}: {v}")
+
+
+#获取下载连接
+import time
+import requests
+
+download_key = "0058123-251120083545085"
+
+status_url = f"https://api.gbif.org/v1/occurrence/download/{download_key}"
+
+print("Checking GBIF download status...\n")
+
+while True:
+    status = requests.get(status_url).json()
+    state = status["status"]
+
+    print("Current status:", state)
+
+    if state == "SUCCEEDED":
+        print("\n🎉 GBIF download is ready!")
+        print("Download link:")
+        print(status["downloadLink"])
+        break
+    elif state in ["KILLED", "CANCELLED", "FAILED"]:
+        print("\n❌ Download failed:", state)
+        print(status)
+        break
+
+    time.sleep(20)
+
+#下载解压
+ !wget -O SouthAmerica.zip https://api.gbif.org/v1/occurrence/download/request/0058124-251120083545085.zip     #名字可更改
+#解压
+import zipfile
+import os
+
+os.makedirs("SouthAmerica", exist_ok=True)
+
+with zipfile.ZipFile("SouthAmerica.zip", "r") as z:
+    z.extractall("SouthAmerica")
+
+os.listdir("SouthAmerica")
+
+#转csv格式
+!sed 's/\t/,/g' NorthAmerica/occurrence.txt > NorthAmerica_occurrence.csv
