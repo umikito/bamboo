@@ -4,10 +4,10 @@ import os
 # 1. 设置工作空间和路径
 csv_path = r"G:\bamboo\csv_point\Samples_NoBambusa.csv"
 output_folder = r"G:\bamboo"
-output_name = "Samples_NoBambusa_Points.shp"  # 也可以直接存入数据库，如 "MyGDB.gdb\points"
+output_name = "Samples_NoBambusa_Points.shp"  # 也可以存入数据库 "MyGDB.gdb\points"
 output_path = os.path.join(output_folder, output_name)
 
-# 2. 定义坐标系（通常 CSV 的经纬度是 WGS 84，代码为 4326）
+# 2. 定义坐标系（WGS 84，代码为 4326）
 sp_ref = arcpy.SpatialReference(4326)
 
 # 3. 执行转换
