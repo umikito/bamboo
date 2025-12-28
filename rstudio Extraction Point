@@ -1,0 +1,37 @@
+library(vroom)
+library(writexl)
+
+
+input_file  <- "G:/bamboo/csv_point/Europe_occurrence.csv"
+output_xlsx <- "G:/bamboo/csv_point/Bambusa_occurrence.xlsx"
+
+dt <- vroom(
+  input_file,
+  delim = ",",
+  col_select = c(
+    gbifID,
+    year,
+    decimalLatitude,
+    decimalLongitude,
+    family,
+    genus
+  ),
+  altrep = TRUE
+)
+
+dt_bambusa <- dt[
+  !is.na(dt$genus) &
+    dt$genus == "Bambusa",
+]
+
+dt_bambusa <- dt_bambusa[
+  !is.na(dt_bambusa$decimalLatitude) &
+    !is.na(dt_bambusa$decimalLongitude),
+]
+
+
+print(nrow(dt_bambusa))
+
+write_xlsx(as.data.frame(dt_bambusa), output_xlsx)
+
+cat("导出完成：", output_xlsx, "\n")
