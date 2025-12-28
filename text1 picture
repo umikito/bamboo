@@ -1,0 +1,101 @@
+# 1. 安装并加载必要的包
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("tidyr")) install.packages("tidyr")
+if (!require("dplyr")) install.packages("dplyr")
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# 2. 读取数据 (请确保路径中的斜杠方向正确)
+# 注意：在 R 中，路径建议使用正斜杠 "/" 或双反斜杠 "\\"
+data_path <- "G:/bamboo/text1/Bamboo_Asia_2015_2022_Simplified.csv"
+df <- read.csv(data_path)
+
+# 3. 数据预处理
+# 将 label 转换为因子（分类变量），并赋予有意义的标签
+df$label <- factor(df$label, levels = c(0, 1), labels = c("Non-Bamboo", "Bamboo"))
+
+# 将数据从“宽格式”转换为“长格式”，方便 ggplot2 一次性绘制所有波段
+df_long <- df %>%
+  select(label, VV_RTC, VH_RTC, VVVH_ratio) %>%
+  pivot_longer(cols = -label, names_to = "Feature", values_to = "Value")
+
+# 4. 绘制多面板箱线图
+ggplot(df_long, aes(x = label, y = Value, fill = label)) +
+  geom_boxplot(outlier.colour = "red", outlier.shape = 1, alpha = 0.7) +
+  facet_wrap(~Feature, scales = "free_y") + # 每个特征独立坐标轴
+  theme_bw() + # 经典的白色背景主题
+  labs(
+    title = "Comparison of SAR Features between Bamboo and Non-Bamboo",
+    x = "Land Cover Type",
+    y = "Feature Value",
+    fill = "Class"
+  ) +
+  scale_fill_manual(values = c("Non-Bamboo" = "#3498db", "Bamboo" = "#2ecc71")) + # 设置配色
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10)
+  )
+
+# 5. 可选：保存图片到本地
+# ggsave("G:/bamboo/text1/Feature_Boxplot.png", width = 10, height = 6, dpi = 300)
+
+
+
+# 1. 安装并加载必要的包 (如果之前已经安装，这步可以跳过)
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("tidyr")) install.packages("tidyr")
+if (!require("dplyr")) install.packages("dplyr")
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# 2. 读取数据 (请确保路径中的斜杠方向正确)
+data_path <- "G:/bamboo/text1/Bamboo_Asia_2015_2022_Simplified.csv"
+df <- read.csv(data_path)
+
+# 3. 数据预处理
+# 将 label 转换为因子（分类变量），并赋予有意义的标签
+df$label <- factor(df$label, levels = c(0, 1), labels = c("Non-Bamboo", "Bamboo"))
+
+# 定义配色
+colors <- c("Non-Bamboo" = "#3498db", "Bamboo" = "#2ecc71")
+
+# --- 绘制散点图 ---
+# 通常选择两个最重要的特征进行可视化，例如 VV_RTC 和 VH_RTC
+ggplot(df, aes(x = VV_RTC, y = VH_RTC, color = label)) +
+  geom_point(alpha = 0.6, size = 2) + # 绘制散点，设置透明度和大小
+  stat_ellipse(aes(group = label), type = "norm", level = 0.68, linetype = "dashed") + # 绘制椭圆，显示分布密度
+  theme_bw() +
+  labs(
+    title = "Scatter Plot of VV_RTC vs. VH_RTC",
+    x = "VV_RTC (Linear)",
+    y = "VH_RTC (Linear)",
+    color = "Class"
+  ) +
+  scale_color_manual(values = colors) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# 可选：保存散点图
+# ggsave("G:/bamboo/text1/Scatter_VV_VH.png", width = 8, height = 6, dpi = 300)
+
+# --- 绘制密度图 ---
+# 将数据从“宽格式”转换为“长格式”，方便 ggplot2 一次性绘制所有波段
+df_long_density <- df %>%
+  select(label, VV_RTC, VH_RTC, VVVH_ratio) %>%
+  pivot_longer(cols = -label, names_to = "Feature", values_to = "Value")
+
+ggplot(df_long_density, aes(x = Value, fill = label)) +
+  geom_density(alpha = 0.6) + # 绘制密度图，设置透明度
+  facet_wrap(~Feature, scales = "free_x") + # 每个特征独立横坐标
+  theme_bw() +
+  labs(
+    title = "Density Plot of SAR Features by Class",
+    x = "Feature Value",
+    y = "Density",
+    fill = "Class"
+  ) +
+  scale_fill_manual(values = colors) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
