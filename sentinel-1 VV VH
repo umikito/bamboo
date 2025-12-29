@@ -1,178 +1,117 @@
 /********************************************************
- * 1. 数据加载
+ * 1. 数据加载与基础设置
  ********************************************************/
 var bamboo = ee.FeatureCollection("projects/my-project1-477312/assets/Asia_bambusa");
 var negative = ee.FeatureCollection("projects/my-project1-477312/assets/nobambusa_china");
 var roi = ee.FeatureCollection("projects/my-project1-477312/assets/text1").geometry();
 
-var start = '2020-01-01';
-var end   = '2021-12-31';
-
-
-/********************************************************
- * 2. Sentinel-1 加载（VV/VH, GRD）
- ********************************************************/
-var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
-  .filterBounds(roi)
-  .filterDate(start, end)
-  .filter(ee.Filter.eq('instrumentMode', 'IW'))
-  .filter(ee.Filter.eq('productType', 'GRD'))
-  .filter(ee.Filter.listContains('transmitterReceiverPolarisation','VV'))
-  .filter(ee.Filter.listContains('transmitterReceiverPolarisation','VH'))
-  .select(['VV','VH','angle']);
-
+// 锁定 2020 年
+var year = 2020;
 
 /********************************************************
- * 3. σ0 (dB → Linear)
- ********************************************************/
-function toSigma0(img){
-  var vv = ee.Image(10).pow(img.select('VV').divide(10)).rename('VV_sigma0');
-  var vh = ee.Image(10).pow(img.select('VH').divide(10)).rename('VH_sigma0');
-  return img.addBands([vv, vh]);
-}
-var s1_sigma0 = s1.map(toSigma0);
-
-
-/********************************************************
- * 4. 地形数据
+ * 2. 基础数据准备（DEM 与 RTC 预处理函数）
  ********************************************************/
 var dem = ee.Image('USGS/SRTMGL1_003');
 var terrain = ee.Algorithms.Terrain(dem);
 var slopeRad  = terrain.select('slope').multiply(Math.PI/180);
 var aspectRad = terrain.select('aspect').multiply(Math.PI/180);
 
-
-/********************************************************
- * 5. γ0 + RTC 计算
- ********************************************************/
-var s1_RTC = s1_sigma0.map(function(img){
-
+// 单景影像 RTC 矫正函数
+function applyRTC(img) {
+  var vv_linear = ee.Image(10).pow(img.select('VV').divide(10));
+  var vh_linear = ee.Image(10).pow(img.select('VH').divide(10));
   var theta_i = img.select('angle').multiply(Math.PI/180);
-
   var phi_i = ee.Image.constant(0);
   var phi_s = aspectRad;
-
-  var alpha_range = (slopeRad.tan()
-    .multiply((phi_i.subtract(phi_s)).cos()))
-    .atan();
-
-  var VV_gamma0 = img.select('VV_sigma0').divide(theta_i.cos());
-  var VH_gamma0 = img.select('VH_sigma0').divide(theta_i.cos());
-
+  var alpha_range = (slopeRad.tan().multiply((phi_i.subtract(phi_s)).cos())).atan();
+  
+  var gamma0_vv = vv_linear.divide(theta_i.cos());
+  var gamma0_vh = vh_linear.divide(theta_i.cos());
+  
   var num = (ee.Image.constant(Math.PI/2).subtract(theta_i)).tan();
   var den = (ee.Image.constant(Math.PI/2).subtract(theta_i).add(alpha_range)).tan();
   var ratio = num.divide(den);
+  
+  var VV_RTC = gamma0_vv.multiply(ratio).rename('VV');
+  var VH_RTC = gamma0_vh.multiply(ratio).rename('VH');
+  var ratio_band = VV_RTC.divide(VH_RTC).rename('Ratio');
+  
+  return ee.Image([VV_RTC, VH_RTC, ratio_band])
+    .copyProperties(img, ['system:time_start']);
+}
 
-  var VV_RTC = VV_gamma0.multiply(ratio).rename('VV_RTC');
-  var VH_RTC = VH_gamma0.multiply(ratio).rename('VH_RTC');
+/********************************************************
+ * 3. 按月合成多波段影像
+ ********************************************************/
+var months = ee.List.sequence(1, 12);
 
-  var VVVH_ratio = VV_RTC.divide(VH_RTC).rename('VVVH_ratio');
+var monthlyImage = ee.ImageCollection.fromImages(months.map(function(m) {
+  var start = ee.Date.fromYMD(year, m, 1);
+  var end = start.advance(1, 'month');
+  
+  var s1_month = ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterBounds(roi)
+    .filterDate(start, end)
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation','VV'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation','VH'))
+    .map(applyRTC);
+  
+  var monthMean = s1_month.mean().clip(roi);
+  var monthName = ee.String('_Month_').cat(ee.Number(m).format('%02d'));
+  
+  return monthMean.rename([
+    ee.String('VV').cat(monthName),
+    ee.String('VH').cat(monthName),
+    ee.String('Ratio').cat(monthName)
+  ]);
+})).toBands();
 
-  return img.addBands([VV_RTC, VH_RTC, VVVH_ratio]);
+/********************************************************
+ * 4. 创建缓冲区并进行均值提取 (Reduce Regions)
+ ********************************************************/
+// 10米缓冲区约覆盖 10x10m 像素及其周边，能有效平滑数据
+var bufferRadius = 10; 
+
+// 处理竹林样本
+var bamboo_roi = bamboo.filterBounds(roi).map(function(f) {
+  return f.buffer(bufferRadius).set('label', 1);
 });
 
+// 处理非竹林样本（保留原始 Map 属性）
+var nonbamboo_roi = negative.filterBounds(roi).map(function(f) {
+  return f.buffer(bufferRadius).set('label', ee.Number(f.get('Map')));
+});
 
-/********************************************************
- * 6. 合成均值
- ********************************************************/
-var meanImg = s1_RTC
-  .select(['VV_RTC','VH_RTC','VVVH_ratio'])
-  .mean()
-  .clip(roi);
+// 合并矢量集合
+var combinedSamples = bamboo_roi.merge(nonbamboo_roi);
 
-
-
-/********************************************************
- * A. 数据加载
- ********************************************************/
-var table  = ee.FeatureCollection("projects/my-project1-477312/assets/Asia_bambusa");
-var table2 = ee.FeatureCollection("projects/my-project1-477312/assets/nobambusa_china");
-var table3 = ee.FeatureCollection("projects/my-project1-477312/assets/text1");
-var roi = table3.geometry();
-
-
-/********************************************************
- * B. 只保留研究区内样本点
- ********************************************************/
-var bamboo_roi = table.filterBounds(roi);
-var nonbamboo_roi = table2.filterBounds(roi);
-
-print('研究区内竹林样本数量:', bamboo_roi.size());
-print('研究区内非竹林样本数量:', nonbamboo_roi.size());
-
-
-/********************************************************
- * C. 从 meanImg 采样 SAR 特征
- *    特征包括：
- *      VV_RTC
- *      VH_RTC
- *      VVVH_ratio
- ********************************************************/
-
-// 竹林样本
-var bamboo_training = meanImg.sampleRegions({
-  collection: bamboo_roi,
-  properties: [],        // 不修改已有属性
+// 使用 reduceRegions 提取缓冲区内的平均值
+var training_features = monthlyImage.reduceRegions({
+  collection: combinedSamples,
+  reducer: ee.Reducer.mean(),
   scale: 10,
-  geometries: true
+  tileScale: 16
 });
 
-// 非竹林样本
-var nonbamboo_training = meanImg.sampleRegions({
-  collection: nonbamboo_roi,
-  properties: [],
-  scale: 10,
-  geometries: true
-});
-
-print('已提取SAR特征的竹林样本：', bamboo_training.limit(10));
-print('已提取SAR特征的非竹林样本：', nonbamboo_training.limit(10));
-
+// 过滤掉因为缓冲区超出影像边缘产生的空值点
+var training_cleaned = training_features.filter(ee.Filter.notNull(monthlyImage.bandNames()));
 
 /********************************************************
- * D. 添加类别标签
- *    竹林 = 1
- *    非竹林 = 0
+ * 5. 导出设置
  ********************************************************/
-bamboo_training = bamboo_training.map(function(f){
-  return f.set('label', 1);
-});
+// 获取波段名称，这些名称在 reduceRegions 后会自动作为属性
+var bandNames = monthlyImage.bandNames();
+var exportProperties = bandNames.add('label');
 
-nonbamboo_training = nonbamboo_training.map(function(f){
-  return f.set('label', 0);
-});
-
-
-/********************************************************
- * E. 合并训练集
- ********************************************************/
-var training = bamboo_training.merge(nonbamboo_training);
-
-print('训练样本总量：', training.size());
-print('训练样本表结构：', training.first());
-
-/********************************************************
- * F. 打乱训练样本并检查字段
- ********************************************************/
-var training_shuffled = training.randomColumn('rand')
-                                .sort('rand')
-                                .select([
-  'VV_RTC',
-  'VH_RTC',
-  'VVVH_ratio',
-  'label',
-  '.geo'       // 保留坐标
-]);
-
-print('最终训练样本结构：', training_shuffled.first());
-print('最终样本数量：', training_shuffled.size());
-
-/********************************************************
- * G. 导出训练样本到Google Drive
- ********************************************************/
 Export.table.toDrive({
-  collection: training_shuffled,
-  description: 'Bamboo_S1_Training_Samples_text1',
-  fileNamePrefix: 'Bamboo_S1_Training_Samples_text1',
-  fileFormat: 'CSV'
+  collection: training_cleaned,
+  description: 'Bamboo_Monthly_Buffered_Samples_2020',
+  fileNamePrefix: 'Bamboo_Monthly_Buffered_Samples_2020',
+  fileFormat: 'CSV',
+  selectors: exportProperties.getInfo() 
 });
+
+print('月度合成影像波段预览：', bandNames);
+print('样本点（含10m缓冲区）提取完成。');
+print('样本分布检查：', training_cleaned.aggregate_histogram('label'));
