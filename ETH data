@@ -1,0 +1,79 @@
+/********************************************************
+ * 1. 数据加载与基础设置
+ ********************************************************/
+var bamboo = ee.FeatureCollection("projects/my-project1-477312/assets/Asia_bambusa");
+var nonbamboo = ee.FeatureCollection("projects/my-project1-477312/assets/nobambusa_china");
+var roi = ee.FeatureCollection("projects/my-project1-477312/assets/text1").geometry();
+
+// 加载 ETH 全球冠层高度及标准差数据 (10m 分辨率)
+var canopy_height = ee.Image('users/nlang/ETH_GlobalCanopyHeight_2020_10m_v1');
+var standard_deviation = ee.Image('users/nlang/ETH_GlobalCanopyHeightSD_2020_10m_v1');
+
+// 将高度和标准差合并为一张影像，并裁剪至研究区
+var height_img = ee.Image.cat([
+  canopy_height.rename('CH_mean'), 
+  standard_deviation.rename('CH_sd')
+]).clip(roi);
+
+/********************************************************
+ * 2. 样本缓冲区处理
+ ********************************************************/
+var bufferRadius = 10; // 10米缓冲区
+
+// 竹林样本 (Label = 1)
+var bamboo_buf = bamboo.filterBounds(roi).map(function(f){
+  return f.buffer(bufferRadius).set('label', 1);
+});
+
+// 非竹林样本 (根据原始属性 'Map' 赋值)
+var nonbamboo_buf = nonbamboo.filterBounds(roi).map(function(f){
+  var labelVal = ee.Number(f.get('Map'));
+  return f.buffer(bufferRadius).set('label', labelVal);
+});
+
+// 合并所有样本
+var samples = bamboo_buf.merge(nonbamboo_buf);
+
+/********************************************************
+ * 3. 提取缓冲区特征
+ ********************************************************/
+// 使用 reduceRegions 计算缓冲区内的均值
+var training = height_img.reduceRegions({
+  collection: samples,
+  reducer: ee.Reducer.mean(),
+  scale: 10,
+  tileScale: 16
+});
+
+// 过滤掉掉落在影像边缘或无值区的样本点
+var training_clean = training.filter(ee.Filter.notNull(['CH_mean']));
+
+/********************************************************
+ * 4. 导出 CSV
+ ********************************************************/
+Export.table.toDrive({
+  collection: training_clean,
+  description: 'ETH_CanopyHeight_Samples_2020',
+  fileNamePrefix: 'ETH_CanopyHeight_Samples_2020',
+  fileFormat: 'CSV',
+  selectors: ['CH_mean', 'CH_sd', 'label'] // 导出高度均值、标准差及标签
+});
+
+/********************************************************
+ * 5. 地图可视化检查
+ ********************************************************/
+Map.centerObject(roi, 10);
+
+// 冠层高度可视化：从浅绿到深绿
+var heightVis = {
+  min: 0,
+  max: 40,
+  palette: ['#ffffff', '#f7fcb9', '#addd8e', '#31a354', '#006837']
+};
+
+Map.addLayer(height_img.select('CH_mean'), heightVis, 'ETH Canopy Height (Mean)');
+Map.addLayer(bamboo, {color: 'green'}, 'Bamboo Points');
+Map.addLayer(nonbamboo, {color: 'red'}, 'Non-bamboo Points');
+
+print('总提取样本数量：', training_clean.size());
+print('样本特征属性预览：', training_clean.first());
