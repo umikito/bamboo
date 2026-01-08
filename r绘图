@@ -1,0 +1,68 @@
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(extrafont)
+
+# ===== 字体（font_import 只需首次运行一次）=====
+# font_import(pattern = "times")
+loadfonts(device = "win")
+
+# ===== 读取数据 =====
+df <- read.csv("G:/bamboo/text1/S2_2020.csv")
+
+# ===== 数据预处理 =====
+df_long <- df %>%
+  mutate(Class = case_when(
+    class == 1  ~ "Bamboo",
+    class == 10 ~ "Trees",
+    class %in% c(20, 30) ~ "Grass_Shrub",
+    TRUE ~ "Other"
+  )) %>%
+  filter(Class != "Other") %>%
+  pivot_longer(
+    cols = contains("_Month_"),
+    names_to = "Feature_Raw",
+    values_to = "Value"
+  ) %>%
+  separate(Feature_Raw, into = c("Feature", "tmp", "Month"), sep = "_") %>%
+  mutate(Month = as.numeric(Month)) %>%
+  group_by(Class, Feature, Month) %>%
+  summarise(mean_val = mean(Value, na.rm = TRUE), .groups = "drop")
+
+# ===== 颜色映射 =====
+custom_colors <- c(
+  "Bamboo"      = "#2B821D",
+  "Trees"       = "#0098D9",
+  "Grass_Shrub" = "#E6B600"
+)
+
+# ===== 绘制 DVI / RVI / CRI =====
+p <- ggplot(
+  df_long %>% filter(Feature %in% c("NDVI", "GCVI", "MTCI","LSWI")),
+  aes(x = Month, y = mean_val, color = Class, group = Class)
+) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~Feature, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = custom_colors) +
+  scale_x_continuous(breaks = 1:12) +
+  theme_bw() +
+  labs(x = "Month", y = "Mean Index Value", color = "") +
+  theme(
+    text = element_text(family = "Times New Roman"),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+# ===== 显示图形 =====
+print(p)
+
+# 将绘图对象保存为 TIFF
+ggsave(
+  filename = "G:/bamboo/text1/NDVI_2020.tiff",
+  device   = "tiff",
+  dpi      = 300,
+  compression = "lzw"
+)
