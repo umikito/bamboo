@@ -1,0 +1,66 @@
+/****************************************************
+ * 1. 变量替换区 (每次只改这里)
+ ****************************************************/
+var currentBamboo = table11;    // 依次替换为  table4, table5...
+var targetClimate = 'Dw';      // 依次替换为 ' 'Bs', 'Bw', 'Cf', 'Cw', 'Cs', 'Df', 'Ds', 'Dw'
+
+var koppen = table12;          // 柯本气候区矢量数据集
+var worldcover = ee.Image('ESA/WorldCover/v200/2021').select('Map');
+
+/****************************************************
+ * 2. 自动化处理逻辑
+ ****************************************************/
+// 筛选当前气候区几何范围
+var region = koppen.filter(ee.Filter.eq('CliType', targetClimate)).geometry();
+
+// 采样规模计算：Aw/Bs 等区面积大，建议初始点数设多一点，确保森林/草地都能采到
+// 逻辑：该区竹林点数的 3 倍，但不低于 200 个点
+var numPoints = currentBamboo.size().multiply(3).max(200); 
+
+// 第一步：在当前气候区随机撒点
+var randomPoints = ee.FeatureCollection.randomPoints({
+  region: region,
+  points: numPoints,
+  seed: 42
+});
+
+// 第二步：提取 WorldCover 类别 (10:森林, 30:草地)
+var sampledPoints = worldcover.reduceRegions({
+  collection: randomPoints,
+  reducer: ee.Reducer.first(),
+  scale: 10
+});
+
+// 第三步：分类过滤并打标
+var forestPoints = sampledPoints.filter(ee.Filter.eq('first', 10))
+  .map(function(f) {
+    var coords = f.geometry().coordinates();
+    return f.set({'lon': coords.get(0), 'lat': coords.get(1), 'type': 'Forest', 'label': 2, 'climate': targetClimate});
+  });
+
+var grassPoints = sampledPoints.filter(ee.Filter.eq('first', 30))
+  .map(function(f) {
+    var coords = f.geometry().coordinates();
+    return f.set({'lon': coords.get(0), 'lat': coords.get(1), 'type': 'Grass', 'label': 3, 'climate': targetClimate});
+  });
+
+// 合并当前区结果
+var finalOutput = forestPoints.merge(grassPoints);
+
+/****************************************************
+ * 3. 验证与导出
+ ****************************************************/
+print('--- 当前处理区域: ' + targetClimate + ' ---');
+print('撒点总数:', numPoints);
+print('提取到的森林点数:', forestPoints.size());
+print('提取到的草地点数:', grassPoints.size());
+
+// 导出 CSV
+Export.table.toDrive({
+  collection: finalOutput,
+  description: 'NonBamboo_Export_' + targetClimate,
+  folder: 'Bamboo_Project_Final',
+  fileNamePrefix: 'NonBamboo_' + targetClimate + '_Points',
+  fileFormat: 'CSV',
+  selectors: ['lon', 'lat', 'type', 'label', 'climate']
+});
