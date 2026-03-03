@@ -130,3 +130,188 @@ Export.table.toDrive({
 
 print('当前气候区 ' + targetClimate + ' 任务已就绪');
 print('最终波段结构:', finalS1Image.bandNames());
+
+//版本2
+var targetClimate = 'Cf';  
+var year = 2020;
+
+var bambooDict = {
+  'Af': table,  'Am': table3, 'Aw': table5,  'Bs': table6, 
+  'Bw': table7, 'Cf': table8, 'Cs': table9,  'Cw': table10, 
+  'Df': table11,'Ds': table12,'Dw': table13
+};
+
+var nonBambooDict = {
+  'Af': table2,  'Am': table4,  'Aw': table14, 'Bs': table15, 
+  'Bw': table16, 'Cf': table17, 'Cs': table18, 'Cw': table19, 
+  'Df': table20, 'Ds': table21, 'Dw': table22
+};
+
+// 统一属性
+var currentBamboo = bambooDict[targetClimate].map(function(f) {
+  return f.set({
+    'label': 1,
+    'class': 1,
+    'type': 'Bamboo',
+    'climate': targetClimate
+  });
+});
+
+var currentNonBamboo = nonBambooDict[targetClimate].map(function(f) {
+  var lb = ee.Number(f.get('label'));
+  var typeStr = ee.Algorithms.If(lb.eq(2), 'Forest', 'Grass');
+  return f.set({
+    'label': lb,
+    'class': lb,
+    'type': typeStr,
+    'climate': targetClimate
+  });
+});
+
+var samples = currentBamboo.merge(currentNonBamboo);
+var roi = samples.geometry().bounds();
+
+
+/********************************************************
+ * 2. DEM 与几何参数
+ ********************************************************/
+var dem = ee.Image('USGS/SRTMGL1_003');
+var terrain = ee.Algorithms.Terrain(dem);
+
+var slopeRad  = terrain.select('slope').multiply(Math.PI/180);
+var aspectRad = terrain.select('aspect').multiply(Math.PI/180);
+
+
+/********************************************************
+ * 3. 严格双极化 RTC 函数
+ ********************************************************/
+function applyRTC(img) {
+
+  var theta_i = img.select('angle').multiply(Math.PI/180);
+
+  var alpha_range = slopeRad.tan()
+    .multiply(ee.Image.constant(0).subtract(aspectRad).cos())
+    .atan();
+
+  var num = ee.Image.constant(Math.PI/2).subtract(theta_i).tan();
+  var den = ee.Image.constant(Math.PI/2).subtract(theta_i).add(alpha_range).tan();
+  var ratio_rtc = num.divide(den);
+
+  // VV
+  var vv_linear = ee.Image(10)
+    .pow(img.select('VV').divide(10));
+
+  var VV_RTC = vv_linear
+    .divide(theta_i.cos())
+    .multiply(ratio_rtc)
+    .toFloat()
+    .rename('VV');
+
+  // VH
+  var vh_linear = ee.Image(10)
+    .pow(img.select('VH').divide(10));
+
+  var VH_RTC = vh_linear
+    .divide(theta_i.cos())
+    .multiply(ratio_rtc)
+    .toFloat()
+    .rename('VH');
+
+  // Ratio
+  var Ratio = VV_RTC
+    .divide(VH_RTC.unmask(1e-6))
+    .toFloat()
+    .rename('Ratio');
+
+  return ee.Image([VV_RTC, VH_RTC, Ratio])
+    .copyProperties(img, ['system:time_start']);
+}
+
+
+/********************************************************
+ * 4. 月尺度合成
+ ********************************************************/
+var months = ee.List.sequence(1, 12);
+
+var monthlyImage = ee.ImageCollection.fromImages(
+  months.map(function(m) {
+
+    var start = ee.Date.fromYMD(year, m, 1);
+    var end   = start.advance(1, 'month');
+
+    // 关键：强制双极化
+    var s1_month = ee.ImageCollection('COPERNICUS/S1_GRD')
+      .filterBounds(roi)
+      .filterDate(start, end)
+      .filter(ee.Filter.eq('instrumentMode', 'IW'))
+      .filter(ee.Filter.eq('resolution_meters', 10))
+      .filter(ee.Filter.listContains(
+        'transmitterReceiverPolarisation', 'VH'))
+      .map(applyRTC);
+
+    var monthMean = ee.Image(
+      ee.Algorithms.If(
+        s1_month.size().gt(0),
+        s1_month.mean(),
+        ee.Image.constant([0,0,0])
+          .toFloat()
+          .rename(['VV','VH','Ratio'])
+          .updateMask(ee.Image.constant(0))
+      )
+    ).clip(roi);
+
+    var monthName = ee.String('_Month_')
+      .cat(ee.Number(m).format('%02d'));
+
+    return monthMean.rename([
+      ee.String('VV').cat(monthName),
+      ee.String('VH').cat(monthName),
+      ee.String('Ratio').cat(monthName)
+    ]);
+
+  })
+).toBands();
+
+
+// 去除自动索引前缀
+var bandNames = monthlyImage.bandNames().map(function(name) {
+  return ee.String(name).split('_').slice(1).join('_');
+});
+
+var finalS1Image = monthlyImage.rename(bandNames);
+
+
+/********************************************************
+ * 5. 10m 缓冲区均值提取
+ ********************************************************/
+var bufferRadius = 10;
+
+var bufferedSamples = samples.map(function(f) {
+  return f.buffer(bufferRadius);
+});
+
+var sampledTable = finalS1Image.reduceRegions({
+  collection: bufferedSamples,
+  reducer: ee.Reducer.mean(),
+  scale: 10
+});
+
+
+/********************************************************
+ * 6. 导出
+ ********************************************************/
+var exportName = targetClimate + '_Bamboo_Monthly_RTC_2020';
+
+Export.table.toDrive({
+  collection: sampledTable,
+  description: 'S1_RTC_Extract_' + targetClimate,
+  folder: 'Bamboo_S1_RTC_Monthly',
+  fileNamePrefix: exportName,
+  fileFormat: 'CSV',
+  selectors: ['class','label','type','climate']
+    .concat(bandNames.getInfo())
+});
+
+print('--- ' + targetClimate + ' 任务已就绪 ---');
+print('波段总数:', finalS1Image.bandNames().length());
+print('示例波段名:', finalS1Image.bandNames().slice(0,3));
