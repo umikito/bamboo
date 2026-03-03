@@ -1,41 +1,132 @@
-/****************************************************
- * 1. 变量替换区 (当前处理: Aw)
- ****************************************************/
-var bamboo = table3;      // 对应你的变量列表 (例如 Aw 是 table5)
-var nonBamboo = table4;  // 对应你的变量列表 (例如 nobam_Aw 是 table14)
-var climateName = 'Am';   // 气候区简称
+/********************************************************
+ * 1. 变量替换与字典设置 (属性对齐)
+ ********************************************************/
+var targetClimate = 'Af'; // 手动修改: 'Af', 'Am', 'Aw', 'Bs', 'Bw', 'Cf', 'Cs', 'Cw', 'Df', 'Ds', 'Dw'
+var year = 2020;
 
-/****************************************************
- * 2. 统一字段并合并
- ****************************************************/
-// 为竹林样本添加统一属性
-var bambooLabeled = bamboo.map(function(f) {
-  return f.set({
-    'label': 1,
-    'type': 'Bamboo',
-    'climate': climateName
-  });
+var bambooDict = {
+  'Af': table,  'Am': table3, 'Aw': table5,  'Bs': table6, 
+  'Bw': table7, 'Cf': table8, 'Cs': table9,  'Cw': table10, 
+  'Df': table11, 'Ds': table12, 'Dw': table13
+};
+var nonBambooDict = {
+  'Af': table2,  'Am': table4,  'Aw': table14, 'Bs': table15, 
+  'Bw': table16, 'Cf': table17, 'Cs': table18, 'Cw': table19, 
+  'Df': table20, 'Ds': table21, 'Dw': table22
+};
+
+// 属性对齐处理
+var currentBamboo = bambooDict[targetClimate].map(function(f) {
+  return f.set({'label': 1, 'class': 1, 'type': 'Bamboo', 'climate': targetClimate});
 });
 
-// 合并该区的竹林与非竹林样本
-var finalCollection = bambooLabeled.merge(nonBamboo);
+var currentNonBamboo = nonBambooDict[targetClimate].map(function(f) {
+  var lb = ee.Number(f.get('label'));
+  return f.set({'label': lb, 'class': lb, 'climate': targetClimate});
+});
 
-/****************************************************
- * 3. 导出到 Google Drive (CSV)
- ****************************************************/
-// 导出命名格式: 气候名_Bamboo_Monthly_RTC_2020
-var exportName = climateName + '_Bamboo_Monthly_RTC_2020';
+var samples = currentBamboo.merge(currentNonBamboo);
+var roi = samples.geometry().bounds();
+
+/********************************************************
+ * 2. 基础数据准备 (DEM 与 极化自适应 RTC 函数)
+ ********************************************************/
+var dem = ee.Image('USGS/SRTMGL1_003');
+var terrain = ee.Algorithms.Terrain(dem);
+var slopeRad  = terrain.select('slope').multiply(Math.PI/180);
+var aspectRad = terrain.select('aspect').multiply(Math.PI/180);
+
+function applyRTC(img) {
+  // 核心修复：自动检测极化波段名，兼容 HH/HV
+  var bands = img.bandNames();
+  var pV = ee.String(ee.Algorithms.If(bands.contains('VV'), 'VV', 'HH'));
+  var pH = ee.String(ee.Algorithms.If(bands.contains('VH'), 'VH', 'HV'));
+  
+  var v_linear = ee.Image(10).pow(img.select(pV).divide(10));
+  var h_linear = ee.Image(10).pow(img.select(pH).divide(10));
+  var theta_i = img.select('angle').multiply(Math.PI/180);
+  
+  var phi_s = aspectRad;
+  var alpha_range = (slopeRad.tan().multiply((ee.Image.constant(0).subtract(phi_s)).cos())).atan();
+  
+  var gamma0_v = v_linear.divide(theta_i.cos());
+  var gamma0_h = h_linear.divide(theta_i.cos());
+  
+  var num = (ee.Image.constant(Math.PI/2).subtract(theta_i)).tan();
+  var den = (ee.Image.constant(Math.PI/2).subtract(theta_i).add(alpha_range)).tan();
+  var ratio = num.divide(den);
+  
+  var V_RTC = gamma0_v.multiply(ratio).rename('VV'); 
+  var H_RTC = gamma0_h.multiply(ratio).rename('VH');
+  var ratio_band = V_RTC.divide(H_RTC).rename('Ratio');
+  
+  return ee.Image([V_RTC, H_RTC, ratio_band])
+    .copyProperties(img, ['system:time_start']);
+}
+
+/********************************************************
+ * 3. 按月合成多波段影像 (Sentinel-1)
+ ********************************************************/
+var months = ee.List.sequence(1, 12);
+
+var monthlyImage = ee.ImageCollection.fromImages(months.map(function(m) {
+  var start = ee.Date.fromYMD(year, m, 1);
+  var end = start.advance(1, 'month');
+  
+  var s1_month = ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterBounds(roi)
+    .filterDate(start, end)
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    // 移除硬编码的极化过滤，由 applyRTC 内部逻辑处理
+    .map(applyRTC);
+  
+  var monthMean = s1_month.mean().clip(roi);
+  var monthName = ee.String('_Month_').cat(ee.Number(m).format('%02d'));
+  
+  return monthMean.rename([
+    ee.String('VV').cat(monthName),
+    ee.String('VH').cat(monthName),
+    ee.String('Ratio').cat(monthName)
+  ]);
+})).toBands();
+
+// 移除波段名自动生成的数字前缀
+var bandNames = monthlyImage.bandNames().map(function(name) {
+  return ee.String(name).split('_').slice(1).join('_');
+});
+var finalS1Image = monthlyImage.rename(bandNames);
+
+/********************************************************
+ * 4. 10米缓冲区均值提取 (Reduce Regions)
+ ********************************************************/
+var bufferRadius = 10;
+
+// 对点进行缓冲处理
+var bufferedSamples = samples.map(function(f) {
+  return f.buffer(bufferRadius);
+});
+
+// 使用 reduceRegions 计算缓冲区内的均值
+var sampledTable = finalS1Image.reduceRegions({
+  collection: bufferedSamples,
+  reducer: ee.Reducer.mean(),
+  scale: 10
+});
+
+/********************************************************
+ * 5. 导出 CSV
+ ********************************************************/
+var exportName = targetClimate + '_Bamboo_Monthly_RTC_2020';
 
 Export.table.toDrive({
-  collection: finalCollection,
-  description: 'Export_' + exportName,
-  folder: 'Bamboo_Final_Samples', // 云端硬盘中的文件夹名
+  collection: sampledTable,
+  description: 'S1_RTC_Extract_' + targetClimate,
+  folder: 'Bamboo_S1_RTC_Monthly',
   fileNamePrefix: exportName,
   fileFormat: 'CSV',
-  // 确保 CSV 包含所有必要字段
-  selectors: ['lon', 'lat', 'type', 'label', 'climate'] 
+  // 指定导出顺序
+  selectors: ['class', 'label', 'type', 'climate'].concat(bandNames.getInfo())
 });
 
-print('任务已就绪: ' + exportName);
-print('竹林点数:', bambooLabeled.size());
-print('非竹林点数:', nonBamboo.size());
+print('当前气候区 ' + targetClimate + ' 任务已就绪');
+print('最终波段结构:', finalS1Image.bandNames());
