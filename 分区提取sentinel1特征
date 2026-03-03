@@ -1,0 +1,41 @@
+/****************************************************
+ * 1. 变量替换区 (当前处理: Aw)
+ ****************************************************/
+var bamboo = table3;      // 对应你的变量列表 (例如 Aw 是 table5)
+var nonBamboo = table4;  // 对应你的变量列表 (例如 nobam_Aw 是 table14)
+var climateName = 'Am';   // 气候区简称
+
+/****************************************************
+ * 2. 统一字段并合并
+ ****************************************************/
+// 为竹林样本添加统一属性
+var bambooLabeled = bamboo.map(function(f) {
+  return f.set({
+    'label': 1,
+    'type': 'Bamboo',
+    'climate': climateName
+  });
+});
+
+// 合并该区的竹林与非竹林样本
+var finalCollection = bambooLabeled.merge(nonBamboo);
+
+/****************************************************
+ * 3. 导出到 Google Drive (CSV)
+ ****************************************************/
+// 导出命名格式: 气候名_Bamboo_Monthly_RTC_2020
+var exportName = climateName + '_Bamboo_Monthly_RTC_2020';
+
+Export.table.toDrive({
+  collection: finalCollection,
+  description: 'Export_' + exportName,
+  folder: 'Bamboo_Final_Samples', // 云端硬盘中的文件夹名
+  fileNamePrefix: exportName,
+  fileFormat: 'CSV',
+  // 确保 CSV 包含所有必要字段
+  selectors: ['lon', 'lat', 'type', 'label', 'climate'] 
+});
+
+print('任务已就绪: ' + exportName);
+print('竹林点数:', bambooLabeled.size());
+print('非竹林点数:', nonBamboo.size());
