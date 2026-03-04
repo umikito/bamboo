@@ -1,0 +1,302 @@
+// /********************************************************
+// * 1. 变量替换与字典设置 (保持不变)
+// ********************************************************/
+// var targetClimate = 'Dw'; 
+// var year = 2020;
+
+// var bambooDict = {
+//   'Af': table,  'Am': table3, 'Aw': table5,  'Bs': table6, 
+//   'Bw': table7, 'Cf': table8, 'Cs': table9,  'Cw': table10, 
+//   'Df': table11, 'Ds': table12, 'Dw': table13
+// };
+// var nonBambooDict = {
+//   'Af': table2,  'Am': table4,  'Aw': table14, 'Bs': table15, 
+//   'Bw': table16, 'Cf': table17, 'Cs': table18, 'Cw': table19, 
+//   'Df': table20, 'Ds': table21, 'Dw': table22
+// };
+
+// var currentBamboo = bambooDict[targetClimate].map(function(f) {
+//   return f.set({'label':1,'class':1,'type':'Bamboo','climate':targetClimate});
+// });
+
+// var currentNonBamboo = nonBambooDict[targetClimate].map(function(f) {
+//   var lb = ee.Number(f.get('label'));
+//   var typeStr = ee.Algorithms.If(lb.eq(2), 'Forest', 'Grass');
+//   return f.set({'label':lb,'class':lb,'type':typeStr,'climate':targetClimate});
+// });
+
+// var samples = currentBamboo.merge(currentNonBamboo);
+// var roi = samples.geometry().bounds();
+
+// /********************************************************
+// * 2. 预处理函数
+// ********************************************************/
+// function maskS2clouds(image) {
+//   var qa = image.select('QA60');
+//   var mask = qa.bitwiseAnd(1 << 10).eq(0).and(qa.bitwiseAnd(1 << 11).eq(0));
+//   return image.updateMask(mask).divide(10000).copyProperties(image, ['system:time_start']);
+// }
+
+// function addIndices(img) {
+//   img = img.resample('bilinear');
+//   var b = {
+//     'B2':img.select('B2'), 'B3':img.select('B3'), 'B4':img.select('B4'),
+//     'B8':img.select('B8'), 'B5':img.select('B5'), 'B6':img.select('B6'), 'B11':img.select('B11')
+//   };
+//   var NDVI = b.B8.subtract(b.B4).divide(b.B8.add(b.B4)).rename('NDVI');
+//   var EVI = b.B8.subtract(b.B4).multiply(2.5).divide(b.B8.add(b.B4.multiply(6)).subtract(b.B2.multiply(7.5)).add(1)).rename('EVI');
+//   var GCVI = b.B8.divide(b.B3).subtract(1).rename('GCVI');
+//   var MTCI = b.B6.subtract(b.B5).divide(b.B5.subtract(b.B4)).rename('MTCI');
+//   var LSWI = b.B8.subtract(b.B11).divide(b.B8.add(b.B11)).rename('LSWI');
+//   return img.addBands([NDVI, EVI, GCVI, MTCI, LSWI, 
+//                       b.B8.subtract(b.B4).rename('DVI'), 
+//                       b.B8.divide(b.B4).rename('RVI'), 
+//                       b.B3.divide(b.B2).rename('CRI')]);
+// }
+
+// /********************************************************
+// * 3. 月尺度影像堆叠 (修正逻辑)
+// ********************************************************/
+// var months = ee.List.sequence(1, 12);
+// var indexNames = ['NDVI','EVI','GCVI','MTCI','LSWI','DVI','RVI','CRI'];
+
+// var monthlyImage = ee.ImageCollection.fromImages(months.map(function(m) {
+//   var start = ee.Date.fromYMD(year, m, 1);
+//   var end = start.advance(1, 'month');
+  
+//   var monthCol = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+//     .filterBounds(roi)
+//     .filterDate(start, end)
+//     .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 80)) // 你设置的 80%
+//     .map(maskS2clouds)
+//     .map(addIndices)
+//     .select(indexNames);
+
+//   // 如果月份没数据，补齐空值
+//   var monthMean = ee.Image(ee.Algorithms.If(
+//     monthCol.size().gt(0),
+//     monthCol.mean(),
+//     ee.Image.constant(ee.List.repeat(0, indexNames.length)).rename(indexNames).updateMask(0)
+//   )).clip(roi);
+
+//   var suffix = ee.String('_Month_').cat(ee.Number(m).format('%02d'));
+//   return monthMean.rename(ee.List(indexNames).map(function(n){ return ee.String(n).cat(suffix) }));
+// })).toBands();
+
+// // 清理 toBands 产生的 0_ 前缀
+// var finalBandNames = monthlyImage.bandNames().map(function(n){
+//   return ee.String(n).split('_').slice(1).join('_');
+// });
+// var finalImage = monthlyImage.rename(finalBandNames);
+
+// /********************************************************
+// * 4. 10m 缓冲区均值提取与导出
+// ********************************************************/
+// var bufferedSamples = samples.map(function(f){ return f.buffer(10); });
+
+// var sampledS2 = finalImage.reduceRegions({
+//   collection: bufferedSamples,
+//   reducer: ee.Reducer.mean(),
+//   scale: 10,
+//   tileScale: 4 // 增加并行度防止超时
+// });
+
+// var exportName = targetClimate + '_S2_Monthly_2020';
+
+// Export.table.toDrive({
+//   collection: sampledS2,
+//   description: 'S2_Extract_' + targetClimate,
+//   folder: 'Bamboo_S2_Monthly',
+//   fileNamePrefix: exportName,
+//   fileFormat: 'CSV'
+// });
+
+// print('任务已准备就绪: ' + exportName);
+// print('总特征波段数:', finalImage.bandNames().length());
+
+
+
+
+
+
+
+
+/********************************************************
+ * 1. 变量替换与字典设置 (当前处理: Dw)
+ ********************************************************/
+var targetClimate = 'Dw'; 
+var year = 2020;
+
+// 样本资源字典 (请确保 table1-22 已在脚本顶部的 Imports 中定义)
+var bambooDict = {
+  'Af': table,  'Am': table3, 'Aw': table5,  'Bs': table6, 
+  'Bw': table7, 'Cf': table8, 'Cs': table9,  'Cw': table10, 
+  'Df': table11, 'Ds': table12, 'Dw': table13
+};
+var nonBambooDict = {
+  'Af': table2,  'Am': table4,  'Aw': table14, 'Bs': table15, 
+  'Bw': table16, 'Cf': table17, 'Cs': table18, 'Cw': table19, 
+  'Df': table20, 'Ds': table21, 'Dw': table22
+};
+
+// 1.2 属性对齐处理
+var currentBamboo = bambooDict[targetClimate].map(function(f) {
+  return f.set({
+    'label': 1,
+    'class': 1,
+    'type': 'Bamboo',
+    'climate': targetClimate
+  });
+});
+
+var currentNonBamboo = nonBambooDict[targetClimate].map(function(f) {
+  var lb = ee.Number(f.get('label')); // 获取已有的 2(Forest) 或 3(Grass)
+  var typeStr = ee.Algorithms.If(lb.eq(2), 'Forest', 'Grass');
+  return f.set({
+    'label': lb,
+    'class': lb,
+    'type': typeStr,
+    'climate': targetClimate
+  });
+});
+
+// 合并样本并定义研究范围
+var samples = currentBamboo.merge(currentNonBamboo);
+var roi = samples.geometry().bounds();
+
+/********************************************************
+ * 2. Sentinel-2 云掩膜函数
+ ********************************************************/
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+    .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return image.updateMask(mask)
+    .divide(10000)
+    .copyProperties(image, ['system:time_start']);
+}
+
+/********************************************************
+ * 3. 植被指数计算函数
+ ********************************************************/
+function addIndices(img) {
+  var BLUE  = img.select('B2');
+  var GREEN = img.select('B3');
+  var RED   = img.select('B4');
+  var NIR   = img.select('B8');
+  var RE1   = img.select('B5');
+  var RE2   = img.select('B6');
+  var SWIR1 = img.select('B11');
+
+  var NDVI = NIR.subtract(RED).divide(NIR.add(RED)).rename('NDVI');
+  var EVI = NIR.subtract(RED).multiply(2.5)
+    .divide(
+      NIR.add(RED.multiply(6))
+         .subtract(BLUE.multiply(7.5))
+         .add(1)
+    ).rename('EVI');
+
+  var GCVI = NIR.divide(GREEN).subtract(1).rename('GCVI');
+  var MTCI = RE2.subtract(RE1).divide(RE1.subtract(RED)).rename('MTCI');
+  var LSWI = NIR.subtract(SWIR1).divide(NIR.add(SWIR1)).rename('LSWI');
+  var DVI  = NIR.subtract(RED).rename('DVI');
+  var RVI  = NIR.divide(RED).rename('RVI');
+  var CRI  = GREEN.divide(BLUE).rename('CRI');
+
+  return img.addBands([
+    NDVI, EVI, GCVI, MTCI, LSWI, DVI, RVI, CRI
+  ]);
+}
+
+/********************************************************
+ * 4. 月尺度合成 (2020.01–12)
+ ********************************************************/
+var months = ee.List.sequence(1, 12);
+var bandsToSelect = ['NDVI','EVI','GCVI','MTCI','LSWI','DVI','RVI','CRI'];
+
+var monthlyCol = ee.ImageCollection.fromImages(
+  months.map(function (m) {
+    var start = ee.Date.fromYMD(year, m, 1);
+    var end = start.advance(1, 'month');
+
+    // 获取当月影像并计算中值
+    var img = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+      .filterBounds(roi)
+      .filterDate(start, end)
+      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+      .map(maskS2clouds)
+      .map(addIndices)
+      .median()
+      .clip(roi);
+
+    var monthStr = ee.Number(m).format('%02d');
+    var suffix = ee.String('_Month_').cat(monthStr);
+
+    // 重命名波段增加月份后缀
+    var renamed = img.select(bandsToSelect)
+      .rename(
+        ee.List(bandsToSelect).map(function (b) {
+          return ee.String(b).cat(suffix);
+        })
+      );
+
+    return renamed;
+  })
+);
+
+/********************************************************
+ * 5. 合并为多波段影像并清理命名
+ ********************************************************/
+var imageRaw = monthlyCol.toBands();
+
+// 移除 toBands() 自动生成的数字前缀 (例如 0_NDVI_Month_01 -> NDVI_Month_01)
+var cleanNames = imageRaw.bandNames().map(function (name) {
+  var s = ee.String(name);
+  return s.split('_').slice(1).join('_');
+});
+
+var finalImage = imageRaw.rename(cleanNames);
+
+/********************************************************
+ * 6. 缓冲区处理与样本提取
+ ********************************************************/
+// 30米缓冲区 (根据您的变量定义)
+var bufferedSamples = samples.map(function(f) {
+  return f.buffer(30);
+});
+
+// 提取样本点/区的均值
+var sampleTable = finalImage.reduceRegions({
+  collection: bufferedSamples,
+  reducer: ee.Reducer.mean(),
+  scale: 10
+});
+
+/********************************************************
+ * 7. 导出 CSV 到 Google Drive
+ ********************************************************/
+var exportName = 'S2_2020_' + targetClimate + '_Monthly_Indices';
+
+Export.table.toDrive({
+  collection: sampleTable,
+  description: exportName,
+  folder: 'Bamboo_Extract_Project',
+  fileNamePrefix: exportName,
+  fileFormat: 'CSV'
+});
+
+/********************************************************
+ * 8. 检查与控制台输出
+ ********************************************************/
+print('当前处理气候区:', targetClimate);
+print('样本点总数:', samples.size());
+print('提取波段总数:', finalImage.bandNames().length());
+print('波段示例:', finalImage.bandNames().slice(0, 8));
+
+// 可视化样本点
+Map.centerObject(roi, 6);
+Map.addLayer(samples, {color: 'red'}, 'Sample Points');
