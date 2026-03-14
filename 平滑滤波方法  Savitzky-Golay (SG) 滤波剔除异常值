@@ -1,0 +1,95 @@
+# ==========================================
+# Sentinel-2 时间序列异常值剔除 (SG 滤波法)
+# ==========================================
+
+# 1. 环境准备与包检测
+options(timeout = 600) # 延长下载时间防止超时
+required_packages <- c("tidyverse", "prospectr", "zoo")
+
+for (pkg in required_packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    message(paste("正在安装缺失的包:", pkg))
+    install.packages(pkg, repos = "https://mirrors.tuna.tsinghua.edu.cn/CRAN/")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# 2. 路径设置
+input_path  <- "G:/bamboo/sentinel-2 results"
+output_path <- "G:/bamboo/sentinel-2 results/SG clean"
+
+if(!dir.exists(output_path)) dir.create(output_path, recursive = TRUE)
+
+# 获取所有 S2 结果文件
+file_list <- list.files(path = input_path, pattern = "S2_2020_.*_Monthly_Indices.csv", full.names = TRUE)
+
+# 3. 遍历文件处理
+for (file in file_list) {
+  file_name <- basename(file)
+  cat("\n正在处理文件:", file_name, "...\n")
+  
+  # 读取数据
+  df <- read.csv(file, check.names = FALSE)
+  df_filtered <- df # 创建副本用于存储清洗后的数据
+  
+  # 识别所有特征名称 (例如 NDVI, GCVI 等)
+  # 假设列名格式为 Feature_Month_01
+  all_cols <- names(df)
+  feature_names <- unique(gsub("_Month_.*", "", grep("_Month_", all_cols, value = TRUE)))
+  
+  # 对每一行（样点）进行时序清洗
+  for (i in 1:nrow(df)) {
+    
+    for (f in feature_names) {
+      # 获取该特征 12 个月的列名
+      target_cols <- grep(paste0("^", f, "_Month_"), all_cols, value = TRUE)
+      target_cols <- sort(target_cols) # 确保按月份顺序排列
+      
+      # 提取 12 个月的原始数值
+      y_raw <- as.numeric(df[i, target_cols])
+      
+      # 如果有效观测值少于 4 个，SG 滤波无法进行，跳过该行该特征
+      if (sum(!is.na(y_raw)) < 4) next
+      
+      # --- 核心步骤 1：线性插值 ---
+      # SG 滤波要求数据连续且无 NA
+      y_interp <- na.approx(y_raw, x = 1:12, na.rm = FALSE, rule = 2)
+      
+      # --- 核心步骤 2：Savitzky-Golay 平滑 ---
+      # p=多项式阶数, w=窗口大小(必须为奇数), m=导数阶数
+      # 12个月序列较短，建议 w=5, p=2
+      y_smooth <- as.numeric(savitzkyGolay(matrix(y_interp, nrow = 1), p = 2, w = 5, m = 0))
+      
+      # 补齐边缘（因为 SG 滤波窗口会导致两端缺失，我们用插值后的原值补齐）
+      # w=5 时，两端各缺失 2 个点
+      y_smooth_full <- c(y_interp[1:2], y_smooth, y_interp[11:12])
+      
+      # --- 核心步骤 3：残差判定与剔除 ---
+      # 计算原始值与平滑曲线的偏差
+      residual <- abs(y_raw - y_smooth_full)
+      
+      # 动态阈值：使用该序列 2 倍的标准差作为判定基准
+      # 如果偏差超过阈值，认为该月受云干扰，设为 NA
+      std_val <- sd(y_raw, na.rm = TRUE)
+      threshold <- 2 * std_val
+      
+      # 执行剔除：只有当原始值存在且偏差过大时才置空
+      outlier_idx <- which(!is.na(y_raw) & residual > threshold)
+      
+      if (length(outlier_idx) > 0) {
+        df_filtered[i, target_cols[outlier_idx]] <- NA
+      }
+    }
+    
+    # 每处理 500 行打印进度
+    if (i %% 500 == 0) cat("  已处理", i, "行...\n")
+  }
+  
+  # 保存清洗后的文件
+  write.csv(df_filtered, file.path(output_path, file_name), row.names = FALSE)
+  cat("✓ 文件已保存至:", file.path(output_path, file_name), "\n")
+}
+
+cat("\n========================================\n")
+cat("所有 11 个气候区 SG 滤波清洗任务已完成！\n")
+cat("========================================\n")
