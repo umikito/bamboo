@@ -1,0 +1,238 @@
+// =================================================================
+// 1. 研究区筛选 (CliType 为 Af)
+// =================================================================
+var s1_samples = table
+var s2_samples = table2
+// =================================================================
+// 1. 数据导入与区域筛选
+// =================================================================
+var roi = table3.filter(ee.Filter.eq('CliType', 'Af'));
+Map.centerObject(roi, 6);
+
+// =================================================================
+// 2. 核心处理函数：解决 S1 极化冲突与 S2 去云
+// =================================================================
+
+// S1 极化对齐函数：强制将所有影像统一为 VV, VH 命名，并进行边缘掩膜
+var maskS1 = function(image) {
+  var bands = image.bandNames();
+  // 无论原始是 VV/VH 还是 HH/HV，均取前两个波段强制重命名
+  var aligned = ee.Image(ee.Algorithms.If(
+    bands.contains('VV'),
+    image.select(['VV', 'VH']),
+    image.select([0, 1], ['VV', 'VH'])
+  ));
+  // 掩膜掉雷达边缘低值噪声
+  var edge = aligned.gt(-30.0);
+  return aligned.updateMask(edge).float();
+};
+
+// S2 去云函数 (使用 QA60 波段)
+var maskS2 = function(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask).divide(10000); // 提前归一化
+};
+
+// =================================================================
+// 3. 建立年度保底图（Gap Filling 模板）
+// =================================================================
+var s2Bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'B12'];
+var s1Bands = ['VV', 'VH'];
+
+var annualS2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(roi).filterDate('2020-01-01', '2020-12-31')
+  .map(maskS2).median().select(s2Bands);
+
+var annualS1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi).filterDate('2020-01-01', '2020-12-31')
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .map(maskS1).median().select(s1Bands);
+
+// =================================================================
+// 4. 逐月合成长时序影像堆栈 (12个月 x 8波段)
+// =================================================================
+var months = ee.List.sequence(1, 12);
+
+var monthlyList = months.map(function(m) {
+  var start = ee.Date.fromYMD(2020, m, 1);
+  var end = start.advance(1, 'month');
+  var monthStr = ee.Number(m).format('%02d');
+
+  // --- S2 模块 ---
+  var s2Month = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterBounds(roi).filterDate(start, end)
+    .map(maskS2).median().select(s2Bands);
+  // 用年度底图补全月度空洞 (覆盖模式)
+  var s2Final = annualS2.addBands(s2Month, s2Bands, true).select(s2Bands);
+
+  // --- S1 模块 ---
+  var s1Month = ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterBounds(roi).filterDate(start, end)
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    .map(maskS1).median().select(s1Bands);
+  // 用年度底图补全月度空洞
+  var s1Final = annualS1.addBands(s1Month, s1Bands, true).select(s1Bands);
+
+  // --- 合并并重命名波段 ---
+  var combined = s2Final.addBands(s1Final).clip(roi);
+  var newNames = combined.bandNames().map(function(n) {
+    return ee.String(n).cat('_Month_').cat(monthStr);
+  });
+  
+  return combined.rename(newNames);
+});
+
+// 将 List 转为多波段大图
+var finalStack = ee.ImageCollection.fromImages(monthlyList).toBands();
+
+// =================================================================
+// 5. 地图可视化 (以 1 月份为例)
+// =================================================================
+Map.addLayer(roi.style({fillColor:'00000000', color:'red'}), {}, 'Af ROI');
+Map.addLayer(finalStack, {
+  bands:['0_B4_Month_01','0_B3_Month_01','0_B2_Month_01'], 
+  min:0, max:0.3
+}, 'January RGB');
+
+// // =================================================================
+// // 6. 自动化按月导出 (解决 96 波段体积过大问题)
+// // =================================================================
+// months.evaluate(function(mList) {
+//   mList.forEach(function(m) {
+//     var monthStr = m < 10 ? '0' + m : '' + m;
+//     var pattern = '.*_Month_' + monthStr;
+//     var monthlyImage = finalStack.select([pattern]);
+    
+//     var exportName = 'Af_Monthly_S1S2_2020_Month_' + monthStr;
+    
+//     Export.image.toDrive({
+//       image: monthlyImage.unmask(0).multiply(10000).toInt16(),
+//       description: exportName,
+//       folder: 'GEE_Af_Bamboo_Project',
+//       fileNamePrefix: exportName,
+//       scale: 10,
+//       region: roi.geometry().bounds(),
+//       maxPixels: 1e13,
+//       crs: 'EPSG:4326'
+//     });
+    
+//     print('已提交任务: ' + exportName);
+//   });
+// });
+
+// print('波段列表已打印在 Console，请去 Tasks 栏点击 Run 启动导出！');
+// print(finalStack.bandNames());
+
+// // =================================================================
+// // 6. 自动化按月导出 (解决 96 波段体积过大问题)
+// // =================================================================
+
+// // 12 个月份的索引定义
+// var monthIndices = ee.List.sequence(1, 12);
+
+// // 使用 evaluate 将服务器端 List 转换为本地循环，触发多个 Task
+// monthIndices.evaluate(function(mList) {
+//   mList.forEach(function(m) {
+//     // 补齐月份字符串 (01, 02, ..., 12)
+//     var monthStr = m < 10 ? '0' + m : '' + m;
+    
+//     // 自动构建匹配当前月份的正则表达式
+//     // 匹配如: 0_B2_Month_01, 0_VV_Month_01 等
+//     var pattern = '.*_Month_' + monthStr;
+//     var monthlyImage = finalStack.select([pattern]);
+    
+//     // 设置导出文件名
+//     var exportName = 'Af_Bamboo_Monthly_S1S2_2020_Month_' + monthStr;
+    
+//     // 执行导出
+//     Export.image.toDrive({
+//       image: monthlyImage.unmask(0).multiply(10000).toInt16(), // 压位保留精度
+//       description: exportName,
+//       folder: 'GEE_Af_Bamboo_Project', // Drive 中的文件夹名
+//       fileNamePrefix: exportName,
+//       scale: 10,
+//       region: roi.geometry().bounds(),
+//       maxPixels: 1e13,
+//       crs: 'EPSG:4326',
+//       fileFormat: 'GeoTIFF'
+//     });
+    
+//     print('已提交任务: 月份 ' + monthStr + ' (包含 8 个波段)');
+//   });
+// });
+
+// print('--- 全部任务已提交，请去右侧 Tasks 栏点击 Run 确认启动 ---');
+// =================================================================
+// // 6. 自动化：分别导出 96 个波段 (每个波段一个 TIFF)
+// // =================================================================
+
+// // 获取 96 个波段的名字列表
+// var allBandNames = finalStack.bandNames();
+
+// // 使用 evaluate 将服务器端的波段列表传给本地浏览器进行循环
+// allBandNames.evaluate(function(names) {
+//   names.forEach(function(name) {
+    
+//     // 1. 提取单个波段
+//     var singleBandImg = finalStack.select([name]);
+    
+//     // 2. 构造导出文件名 (例如: Band_0_B2_Month_01)
+//     var exportName = 'Af_Bamboo_Feature_' + name;
+    
+//     // 3. 执行导出任务
+//     Export.image.toDrive({
+//       image: singleBandImg.unmask(0).multiply(10000).toInt16(), 
+//       description: exportName,
+//       folder: 'GEE_96_Bands_Export', // Drive 中的目标文件夹
+//       fileNamePrefix: exportName,
+//       scale: 10,
+//       region: roi.geometry().bounds(),
+//       maxPixels: 1e13,
+//       crs: 'EPSG:4326'
+//     });
+    
+//     print('已提交波段导出任务: ' + name);
+//   });
+// });
+
+// print('--- 所有 96 个波段任务已生成，请在右侧 Tasks 栏点击 Run ---');
+
+
+// =================================================================
+// 6. 进阶：按 SHP 要素循环导出 (每个要素一个文件)
+// =================================================================
+
+// 将 FeatureCollection 转为 List 方便遍历
+var roiList = roi.toList(roi.size());
+
+// 使用 evaluate 在本地触发循环，避免服务器超时
+roi.size().evaluate(function(size) {
+  for (var i = 0; i < size; i++) {
+    var feature = ee.Feature(roiList.get(i));
+    var geometry = feature.geometry();
+    
+    // 获取一个唯一标识符作为文件名（假设属性里有 'system:index' 或 'ID'）
+    // 如果你的 shp 有特定 ID 字段，请替换 'system:index'
+    var featID = i; 
+    
+    // 导出文件名
+    var exportName = 'Af_Feature_' + featID + '_FullStack_2020';
+    
+    // 执行导出
+    Export.image.toDrive({
+      image: finalStack.clip(geometry).unmask(0).multiply(10000).toInt16(),
+      description: exportName,
+      folder: 'GEE_Af_By_Feature',
+      fileNamePrefix: exportName,
+      scale: 10,
+      region: geometry.bounds(), // 只导出该要素的范围
+      maxPixels: 1e13,
+      crs: 'EPSG:4326'
+    });
+  }
+  print('已提交 ' + size + ' 个要素的整体导出任务，请检查 Tasks 栏。');
+});
