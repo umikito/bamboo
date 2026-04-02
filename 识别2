@@ -1,0 +1,167 @@
+/**************************************
+ * 1. 数据加载与预处理函数
+ **************************************/
+var roi = ee.FeatureCollection("projects/my-project1-477312/assets/anhui_province");
+var bamboo = ee.FeatureCollection("projects/my-project1-477312/assets/bamboo_dbs_points");
+var forest = ee.FeatureCollection("projects/my-project1-477312/assets/nobanboo_dbs");
+
+// 物理光谱波段（新旧版本通用）
+var optBands = ['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12'];
+
+function preprocessS2(img) {
+  // A. 利用 SCL 波段去云 (新旧版 Sentinel-2 均包含 SCL)
+  var scl = img.select('SCL');
+  // 3: 阴影, 8: 中概率云, 9: 高概率云, 10: 卷云, 11: 雪
+  // 我们只保留：4(植被), 5(裸地), 6(水体), 7(未分类)
+  var mask = scl.eq(4).or(scl.eq(5)).or(scl.eq(6)).or(scl.eq(7));
+  
+  // B. 选择物理波段并应用掩膜
+  var spectral = img.select(optBands).updateMask(mask);
+  
+  // C. 计算植被指数 (NDVI, EVI, LSWI, MTCI, GCVI, DVI, RVI)
+  var ndvi = spectral.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var evi = spectral.expression('2.5 * ((B8 - B4) / (B8 + 6 * B4 - 7.5 * B2 + 1))', {
+    'B8': spectral.select('B8'), 'B4': spectral.select('B4'), 'B2': spectral.select('B2')
+  }).rename('EVI');
+  var lswi = spectral.normalizedDifference(['B8', 'B11']).rename('LSWI');
+  var mtci = spectral.expression('(B6 - B5) / (B5 - B4)', {
+    'B6': spectral.select('B6'), 'B5': spectral.select('B5'), 'B4': spectral.select('B4')
+  }).rename('MTCI');
+  var gcvi = spectral.expression('(B8 / B3) - 1', {'B8': spectral.select('B8'), 'B3': spectral.select('B3')}).rename('GCVI');
+  var dvi = spectral.expression('B8 - B4', {'B8': spectral.select('B8'), 'B4': spectral.select('B4')}).rename('DVI');
+  var rvi = spectral.expression('B8 / B4', {'B8': spectral.select('B8'), 'B4': spectral.select('B4')}).rename('RVI');
+  
+  return spectral.addBands([ndvi, evi, lswi, mtci, gcvi, dvi, rvi]).float();
+}
+
+/**************************************
+ * 2. 构建特征集合 (1-12月)
+ **************************************/
+var s2Col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(roi)
+  .filterDate('2024-01-01', '2024-12-31')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+  .map(preprocessS2);
+
+// 1. 光学中值与物候标准差
+var s2Median = s2Col.median().clip(roi);
+var s2Std = s2Col.select(['NDVI', 'MTCI', 'LSWI']).reduce(ee.Reducer.stdDev());
+
+// 2. 哨兵1号雷达 (VV, VH, 极化比)
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filterDate('2024-01-01', '2024-12-31')
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .median().clip(roi);
+var s1Ratio = s1.select('VV').divide(s1.select('VH')).rename('VV_VH_ratio');
+
+// 3. 地形 (海拔, 坡度)
+var terrain = ee.Algorithms.Terrain(ee.Image("USGS/SRTMGL1_003")).select(['elevation', 'slope']).clip(roi);
+
+// 4. 合并特征
+var finalImage = s2Median.addBands(s2Std).addBands(s1.select(['VV','VH'])).addBands(s1Ratio).addBands(terrain);
+
+/**************************************
+ * 3. 掩膜建筑与水体
+ **************************************/
+var worldCover = ee.Image("ESA/WorldCover/v100/2020").clip(roi);
+// 80:水体, 50:建筑, 70:雪/冰
+var landMask = worldCover.neq(80).and(worldCover.neq(50)).and(worldCover.neq(70));
+finalImage = finalImage.updateMask(landMask).float();
+
+
+/**************************************
+ * 6. 分类与精度评估
+ **************************************/
+var samples_fc = bamboo.map(function(f){return f.set('class', 1);})
+  .merge(forest.map(function(f){return f.set('class', 0);}));
+
+var samples = finalImage.sampleRegions({
+  collection: samples_fc,
+  properties: ['class'],
+  scale: 10,
+  tileScale: 4
+});
+
+var withRandom = samples.randomColumn('rand');
+var train = withRandom.filter(ee.Filter.lt('rand', 0.7));
+var test = withRandom.filter(ee.Filter.gte('rand', 0.7));
+
+var classifier = ee.Classifier.smileRandomForest(250).train({
+  features: train,
+  classProperty: 'class',
+  inputProperties: finalImage.bandNames()
+});
+
+var classified = finalImage.classify(classifier);
+var importance = classifier.explain();
+print('特征重要性（原始数据）:', importance);
+
+// 转换为易读的图表
+var importanceChart = ui.Chart.feature.byProperty({
+  features: ee.FeatureCollection([ee.Feature(null, importance.get('importance'))]),
+  xProperties: finalImage.bandNames()
+}).setOptions({
+  title: 'Random Forest Feature Importance',
+  vAxis: {title: 'Importance Score'},
+  hAxis: {title: 'Features'}
+});
+print(importanceChart);
+/**************************************
+ * 7. 可视化与导出
+ **************************************/
+Map.centerObject(roi, 7);
+Map.addLayer(classified, {min:0, max:1, palette:['white', 'green']}, 'Bamboo_Map');
+// // 可视化 NDVI 的标准差（反映一年内谁的绿度变化最剧烈）
+// Map.addLayer(s2Std.select('NDVI_stdDev'), {min: 0, max: 0.2, palette: ['blue', 'yellow', 'red']}, 'NDVI_Volatility');
+
+// print(chart);
+// 导出
+Export.image.toDrive({
+  image: classified.toByte(),
+  description: 'Bamboo_MultiFeature_2024',
+  region: roi.geometry().bounds(),
+  scale: 10,
+  maxPixels: 1e13
+});
+
+print('参与分类的所有波段：', finalImage.bandNames());
+print('分类精度：', test.classify(classifier).errorMatrix('class', 'classification').accuracy());
+
+/**************************************
+ * 15. 长时序物候分析（100米缓冲区）
+ **************************************/
+
+// 从你的样本集中各取一个典型点（或者你可以手动定义坐标）
+var typical_bamboo = bamboo.first().geometry();
+var typical_forest = forest.first().geometry();
+
+// 创建 100 米缓冲区
+var buffer_b = typical_bamboo.buffer(100);
+var buffer_f = typical_forest.buffer(100);
+
+// 定义绘图函数
+function createTSChart(region, label, color) {
+  return ui.Chart.image.series({
+    imageCollection: s2Col.select('NDVI'), // 也可以换成 'MTCI' 或 'EVI'
+    region: region,
+    reducer: ee.Reducer.mean(),
+    scale: 10
+  }).setOptions({
+    title: label + ' 2024 全年物候曲线 (NDVI)',
+    hAxis: {title: '日期'},
+    vAxis: {title: 'NDVI 值'},
+    colors: [color],
+    lineWidth: 2,
+    pointSize: 3
+  });
+}
+
+// 打印图表到控制台
+print('--- 长时序特征分析 ---');
+print(createTSChart(buffer_b, '典型竹林', 'green'));
+print(createTSChart(buffer_f, '典型普通森林', 'brown'));
+
+// 可视化采样范围
+Map.addLayer(buffer_b, {color: 'yellow'}, 'Bamboo_Buffer_100m');
+Map.addLayer(buffer_f, {color: 'white'}, 'Forest_Buffer_100m');
