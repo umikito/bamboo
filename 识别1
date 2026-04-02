@@ -1,0 +1,110 @@
+/**************************************
+ * 1. 数据加载
+ **************************************/
+var roi = ee.FeatureCollection("projects/my-project1-477312/assets/anhui_province");
+var bamboo = ee.FeatureCollection("projects/my-project1-477312/assets/bamboo_dbs_points");
+var forest = ee.FeatureCollection("projects/my-project1-477312/assets/nobanboo_dbs");
+
+// 定义波段变量（修复 bands is not defined）
+var bands = ['B2','B3','B4','B8','B11','B12'];
+
+/**************************************
+ * 2. 建立掩膜：剔除水体和建筑 (ESA 10m)
+ **************************************/
+var worldCover = ee.Image("ESA/WorldCover/v100/2020").clip(roi);
+// ESA 类别码：80(水体), 70(雪冰), 50(建筑/人造地表), 60(裸地)
+// 我们只保留：林地(10), 灌木(20), 草地(30), 耕地(40)
+var landMask = worldCover.eq(10).or(worldCover.eq(20))
+                .or(worldCover.eq(30)).or(worldCover.eq(40));
+
+/**************************************
+ * 3. 影像预处理 (SCL 去云)
+ **************************************/
+function maskS2clouds(img) {
+  var scl = img.select('SCL');
+  // 保留：4(植被), 5(裸地), 6(水体-为了连贯性先保留)
+  var mask = scl.gte(4).and(scl.lte(6));
+  return img.updateMask(mask);
+}
+
+var s2Col = ee.ImageCollection("COPERNICUS/S2_SR")
+  .filterBounds(roi)
+  .filterDate('2024-01-01', '2024-12-31')
+  .map(maskS2clouds)
+  .select(bands);
+
+/**************************************
+ * 4. 特征提取
+ **************************************/
+// A. 时间统计（使用 unmask 填充去云造成的空洞）
+var meanImg = s2Col.mean().rename(['b2m','b3m','b4m','b8m','b11m','b12m']);
+var maxImg  = s2Col.max().rename(['b2x','b3x','b4x','b8x','b11x','b12x']);
+var stdImg  = s2Col.reduce(ee.Reducer.stdDev()).rename(['b2s','b3s','b4s','b8s','b11s','b12s']);
+
+// B. 纹理特征（放宽到夏季 3 个月以防空像素）
+var summerImg = s2Col.filterDate('2024-06-01', '2024-09-01').median().unmask(s2Col.median());
+var scaled = summerImg.multiply(255).divide(10000).toUint8();
+var glcm = scaled.glcmTexture({size: 3});
+var texture = glcm.select([
+  'B8_contrast','B8_ent','B8_idm',
+  'B11_contrast','B11_ent','B11_idm',
+  'B4_contrast','B4_ent','B4_idm'
+]).rename(['nc','ne','ni','sc','se','si','rc','re','ri']);
+
+/**************************************
+ * 5. 合并并应用“水体建筑掩膜”
+ **************************************/
+var finalImage = meanImg
+  .addBands(maxImg)
+  .addBands(stdImg)
+  .addBands(texture)
+  .updateMask(landMask) // ⭐ 在这里剔除建筑和水体
+  .float()
+  .clip(roi);
+
+/**************************************
+ * 6. 采样与分类
+ **************************************/
+var samples_fc = bamboo.map(function(f){return f.set('class', 1);})
+  .merge(forest.map(function(f){return f.set('class', 0);}));
+
+var samples = finalImage.sampleRegions({
+  collection: samples_fc,
+  properties: ['class'],
+  scale: 10,
+  tileScale: 4
+});
+
+var withRandom = samples.randomColumn('rand');
+var train = withRandom.filter(ee.Filter.lt('rand', 0.7));
+var test  = withRandom.filter(ee.Filter.gte('rand', 0.7));
+
+var classifier = ee.Classifier.smileRandomForest(200).train({
+  features: train,
+  classProperty: 'class',
+  inputProperties: finalImage.bandNames()
+});
+
+var classified = finalImage.classify(classifier);
+
+/**************************************
+ * 7. 精度与可视化
+ **************************************/
+print('验证精度:', test.classify(classifier).errorMatrix('class', 'classification').accuracy());
+
+Map.centerObject(roi, 7);
+Map.addLayer(summerImg, {bands:['B4','B3','B2'], min:0, max:3000}, 'S2_Summer');
+Map.addLayer(classified, {min:0, max:1, palette:['#228B22','#FFFF00']}, 'Bamboo_Result');
+
+/**************************************
+ * 8. 导出 (优化版)
+ **************************************/
+Export.image.toDrive({
+  image: classified.toByte(), // 转为 Byte 减小体积
+  description: 'Anhui_Bamboo_2024',
+  folder: 'GEE_Output',
+  fileNamePrefix: 'Anhui_Bamboo_10m',
+  region: roi.geometry().bounds(), // 使用矩形边界导出速度最快
+  scale: 10,
+  maxPixels: 1e13
+});
