@@ -1,19 +1,35 @@
 /**************************************
-* 1. 数据加载与预处理函数
-**************************************/
+ * 1. 数据加载与样本整合
+ **************************************/
 var roi = ee.FeatureCollection("projects/my-project1-477312/assets/anhui_province");
-var bamboo = ee.FeatureCollection("projects/my-project1-477312/assets/bamboo_dbs_points");
-var forest = ee.FeatureCollection("projects/my-project1-477312/assets/nobanboo_dbs");
 
+// 整合样本点 (训练标签: 0:森林, 1:竹林, 2:草地)
+var forest = ee.FeatureCollection("projects/my-project1-477312/assets/nobanboo_dbs")
+  .merge(ee.FeatureCollection("projects/my-project1-477312/assets/forest_samples_ah"))
+  .map(function(f){return f.set('class', 0);});
+
+var bamboo = ee.FeatureCollection("projects/my-project1-477312/assets/bamboo_dbs_points")
+  .merge(ee.FeatureCollection("projects/my-project1-477312/assets/bamboo_ah"))
+  .map(function(f){return f.set('class', 1);});
+
+var grass = ee.FeatureCollection("projects/my-project1-477312/assets/grass_anhui")
+  .merge(ee.FeatureCollection("projects/my-project1-477312/assets/grass_samples_ah"))
+  .map(function(f){return f.set('class', 2);});
+
+var samples_fc = forest.merge(bamboo).merge(grass);
+var year = 2024;
+
+/**************************************
+ * 2. 预处理函数 (光谱 + 植被指数)
+ **************************************/
 var optBands = ['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12'];
 
 function preprocessS2(img) {
   var scl = img.select('SCL');
-  var cloudMask = scl.neq(0).and(scl.neq(1)).and(scl.neq(2)).and(scl.neq(3))
-                    .and(scl.neq(8)).and(scl.neq(9)).and(scl.neq(10));
-  var spectral = img.select(optBands).updateMask(cloudMask);
+  var mask = scl.eq(4).or(scl.eq(5)).or(scl.eq(6)).or(scl.eq(7));
+  var spectral = img.select(optBands).updateMask(mask);
+  
   var ndvi = spectral.normalizedDifference(['B8', 'B4']).rename('NDVI');
-  var ndwi = spectral.normalizedDifference(['B3', 'B8']).rename('NDWI');
   var evi = spectral.expression('2.5 * ((B8 - B4) / (B8 + 6 * B4 - 7.5 * B2 + 1))', {
     'B8': spectral.select('B8'), 'B4': spectral.select('B4'), 'B2': spectral.select('B2')
   }).rename('EVI');
@@ -21,96 +37,41 @@ function preprocessS2(img) {
   var mtci = spectral.expression('(B6 - B5) / (B5 - B4)', {
     'B6': spectral.select('B6'), 'B5': spectral.select('B5'), 'B4': spectral.select('B4')
   }).rename('MTCI');
-  var gcvi = spectral.expression('(B8 / B3) - 1', {
-    'B8': spectral.select('B8'), 'B3': spectral.select('B3')
-  }).rename('GCVI');
-  var dvi = spectral.expression('B8 - B4', {
-    'B8': spectral.select('B8'), 'B4': spectral.select('B4')
-  }).rename('DVI');
-  var rvi = spectral.expression('B8 / B4', {
-    'B8': spectral.select('B8'), 'B4': spectral.select('B4')
-  }).rename('RVI');
-  return spectral.addBands([ndvi, ndwi, evi, lswi, mtci, gcvi, dvi, rvi]).float();
+  
+  return spectral.addBands([ndvi, evi, lswi, mtci]).float();
 }
 
 /**************************************
-* 1. 数据加载与预处理函数
-**************************************/
-var roi = ee.FeatureCollection("projects/my-project1-477312/assets/anhui_province");
-var bamboo = ee.FeatureCollection("projects/my-project1-477312/assets/bamboo_dbs_points");
-var forest = ee.FeatureCollection("projects/my-project1-477312/assets/nobanboo_dbs");
-
-var optBands = ['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12'];
-
-function preprocessS2(img) {
-  var scl = img.select('SCL');
-  var cloudMask = scl.neq(0).and(scl.neq(1)).and(scl.neq(2)).and(scl.neq(3))
-                    .and(scl.neq(8)).and(scl.neq(9)).and(scl.neq(10));
-  var spectral = img.select(optBands).updateMask(cloudMask);
-  var ndvi = spectral.normalizedDifference(['B8', 'B4']).rename('NDVI');
-  var ndwi = spectral.normalizedDifference(['B3', 'B8']).rename('NDWI');
-  var evi = spectral.expression('2.5 * ((B8 - B4) / (B8 + 6 * B4 - 7.5 * B2 + 1))', {
-    'B8': spectral.select('B8'), 'B4': spectral.select('B4'), 'B2': spectral.select('B2')
-  }).rename('EVI');
-  var lswi = spectral.normalizedDifference(['B8', 'B11']).rename('LSWI');
-  var mtci = spectral.expression('(B6 - B5) / (B5 - B4)', {
-    'B6': spectral.select('B6'), 'B5': spectral.select('B5'), 'B4': spectral.select('B4')
-  }).rename('MTCI');
-  var gcvi = spectral.expression('(B8 / B3) - 1', {
-    'B8': spectral.select('B8'), 'B3': spectral.select('B3')
-  }).rename('GCVI');
-  var dvi = spectral.expression('B8 - B4', {
-    'B8': spectral.select('B8'), 'B4': spectral.select('B4')
-  }).rename('DVI');
-  var rvi = spectral.expression('B8 / B4', {
-    'B8': spectral.select('B8'), 'B4': spectral.select('B4')
-  }).rename('RVI');
-  return spectral.addBands([ndvi, ndwi, evi, lswi, mtci, gcvi, dvi, rvi]).float();
-}
-
-/**************************************
-* 2. 构建特征集合 (2024年)
-**************************************/
+ * 3. 构建多源特征集合
+ **************************************/
 var s2Col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
   .filterBounds(roi)
-  .filterDate('2024-01-01', '2024-12-31')
-  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .filterDate(year + '-01-01', year + '-12-31')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
   .map(preprocessS2);
 
 var s2Median = s2Col.median().clip(roi);
-var s2Std = s2Col.select(['NDVI', 'EVI', 'LSWI', 'MTCI', 'GCVI'].concat(optBands))
-                .reduce(ee.Reducer.stdDev());
+var s2Std = s2Col.select(['NDVI', 'MTCI', 'LSWI']).reduce(ee.Reducer.stdDev());
 
 var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
   .filterBounds(roi)
-  .filterDate('2024-01-01', '2024-12-31')
+  .filterDate(year + '-01-01', year + '-12-31')
   .filter(ee.Filter.eq('instrumentMode', 'IW'))
   .median().clip(roi);
-var s1Ratio = s1.select('VV').divide(s1.select('VH')).rename('VV_VH_ratio');
+var s1Ratio = s1.select('VV').divide(s1.select('VH').add(0.0001)).rename('VV_VH_ratio');
 
-var terrain = ee.Algorithms.Terrain(ee.Image("USGS/SRTMGL1_003"))
-                .select(['elevation', 'slope']).clip(roi);
+var terrain = ee.Algorithms.Terrain(ee.Image("USGS/SRTMGL1_003")).select(['elevation', 'slope']).clip(roi);
 
-var finalImage = s2Median.addBands(s2Std)
-                        .addBands(s1.select(['VV','VH']))
-                        .addBands(s1Ratio)
-                        .addBands(terrain);
-
-/**************************************
-* 3. 掩膜建筑、水体
-**************************************/
 var worldCover = ee.Image("ESA/WorldCover/v100/2020").clip(roi);
 var landMask = worldCover.neq(80).and(worldCover.neq(50)).and(worldCover.neq(70));
-var waterMask = s2Median.select('NDVI').lt(0.1).and(s2Median.select('NDWI').gt(0));
-var finalMask = landMask.and(waterMask.not());
-finalImage = finalImage.updateMask(finalMask).float();
+
+var finalImage = s2Median.addBands(s2Std).addBands(s1.select(['VV','VH']))
+  .addBands(s1Ratio).addBands(terrain)
+  .updateMask(landMask).float();
 
 /**************************************
-* 4. 采样与数据划分 (30个样本)
-**************************************/
-var samples_fc = bamboo.map(function(f){ return f.set('class', 1); })
-  .merge(forest.map(function(f){ return f.set('class', 0); }));
-
+ * 4. 采样与分类
+ **************************************/
 var samples = finalImage.sampleRegions({
   collection: samples_fc,
   properties: ['class'],
@@ -118,131 +79,91 @@ var samples = finalImage.sampleRegions({
   tileScale: 4
 });
 
-var withRandom = samples.randomColumn('rand', 42);
+var withRandom = samples.randomColumn('rand');
 var train = withRandom.filter(ee.Filter.lt('rand', 0.7));
-var test  = withRandom.filter(ee.Filter.gte('rand', 0.7));
+var test = withRandom.filter(ee.Filter.gte('rand', 0.7));
 
-/**************************************
-* 5. 训练原始分类器 (小样本优化)
-**************************************/
-var classifier = ee.Classifier.smileRandomForest({
-  numberOfTrees: 50,
-  minLeafPopulation: 1, 
-  bagFraction: 0.7,
-  seed: 42
-}).train({
+var classifier = ee.Classifier.smileRandomForest(250).train({
   features: train,
   classProperty: 'class',
   inputProperties: finalImage.bandNames()
 });
 
+// 原始分类 (0:森林, 1:竹林, 2:草地)
+var rawClassified = finalImage.classify(classifier);
+
 /**************************************
-* 6. 特征重要性
-**************************************/
+ * 5. 标签重映射与背景填充 (★核心逻辑)
+ **************************************/
+// 映射逻辑：竹林(1->1), 森林(0->2), 草地(2->3)
+// 同时用 unmask(0) 将水体建筑填充为 0
+var exportClassified = rawClassified.remap([1, 0, 2], [1, 2, 3])
+  .unmask(0)
+  .clip(roi)
+  .byte();
+
+/**************************************
+ * 6. 精度评估与特征分析
+ **************************************/
+var cm = test.classify(classifier).errorMatrix('class', 'classification');
+print('--- 原始标签精度评估 ---');
+print('整体精度 (OA):', cm.accuracy());
+print('Kappa 系数:', cm.kappa());
+print('混淆矩阵:', cm);
+
 var importance = classifier.explain();
-var impDict = ee.Dictionary(importance.get('importance'));
+print('特征重要性:', importance);
 
-var importanceFC = ee.FeatureCollection(impDict.keys().map(function(key) {
-  return ee.Feature(null, {
-    'feature': key,
-    'importance': impDict.get(key)
+/**************************************
+ * 7. 长时序物候分析
+ **************************************/
+var typical_bamboo = bamboo.first().geometry();
+var typical_forest = forest.first().geometry();
+var typical_grass = grass.first().geometry();
+
+function createTSChart(region, label, color) {
+  return ui.Chart.image.series({
+    imageCollection: s2Col.select('NDVI'),
+    region: region.buffer(100),
+    reducer: ee.Reducer.mean(),
+    scale: 10
+  }).setOptions({
+    title: label + ' 2024 NDVI 物候曲线',
+    hAxis: {title: '日期'},
+    vAxis: {title: 'NDVI'},
+    colors: [color],
+    lineWidth: 2,
+    pointSize: 3
   });
-}));
+}
 
-var importanceChart = ui.Chart.feature.byFeature({
-  features: importanceFC,
-  xProperty: 'feature',
-  yProperties: ['importance']
-}).setChartType('ColumnChart').setOptions({
-  title: 'Random Forest Feature Importance',
-  hAxis: {title: 'Features', slantedText: true, slantedTextAngle: 45},
-  vAxis: {title: 'Importance Score'}
-});
-print('原始特征重要性图表:', importanceChart);
+print('--- 长时序物候对比 ---');
+print(createTSChart(typical_bamboo, '典型竹林', 'green'));
+print(createTSChart(typical_forest, '典型森林', 'brown'));
+print(createTSChart(typical_grass, '典型草地', 'orange'));
 
 /**************************************
-* 7. 原始分类器精度评估
-**************************************/
-var testClassified = test.classify(classifier);
-var confusionMatrix = testClassified.errorMatrix('class', 'classification');
-print('=== 原始分类器精度评估 ===');
-print('Overall Accuracy:', confusionMatrix.accuracy());
-print('Confusion Matrix:', confusionMatrix);
-
-/**************************************
-* 8. 特征筛选 (删除重要性 < 1 的特征)
-**************************************/
-var impFC = ee.FeatureCollection(impDict.keys().map(function(key) {
-  return ee.Feature(null, {feature: key, importance: impDict.get(key)});
-}));
-
-// ★ 核心修改：筛选重要性大于等于 1 的波段
-var selectedFeatures = impFC.filter(ee.Filter.gte('importance', 1))
-                            .sort('importance', false)
-                            .aggregate_array('feature');
-
-print('筛选后保留的特征列表 (重要性 >= 1):', selectedFeatures);
-print('保留特征数量:', selectedFeatures.size());
-
-/**************************************
-* 9. 用筛选特征重新训练与评估
-**************************************/
-// A. 构建筛选后的影像
-var finalImage_selected = finalImage.select(selectedFeatures);
-
-// B. 重新采样
-var samples_selected = finalImage_selected.sampleRegions({
-  collection: samples_fc,
-  properties: ['class'],
-  scale: 10,
-  tileScale: 4,
-  geometries: false
-});
-
-// C. 重新划分数据
-var withRandom_sel = samples_selected.randomColumn('rand', 42);
-var train_sel = withRandom_sel.filter(ee.Filter.lt('rand', 0.7));
-var test_sel  = withRandom_sel.filter(ee.Filter.gte('rand', 0.7));
-
-// D. 训练筛选后的分类器 (针对极小样本进一步简化)
-var classifier_sel = ee.Classifier.smileRandomForest({
-  numberOfTrees: 30,       
-  minLeafPopulation: 2,    
-  bagFraction: 0.8,
-  seed: 42
-}).train({
-  features: train_sel,
-  classProperty: 'class',
-  inputProperties: selectedFeatures
-});
-
-// E. 计算筛选后的精度
-var testClassified_sel = test_sel.classify(classifier_sel);
-var cm_sel = testClassified_sel.errorMatrix('class', 'classification');
-
-print('=== 使用筛选特征后的精度 (删除 < 1 特征后) ===');
-print('Overall Accuracy (Selected):', cm_sel.accuracy());
-print('Kappa (Selected):', cm_sel.kappa());
-print('Confusion Matrix (Selected):', cm_sel);
-
-/**************************************
-* 10. 分类、可视化与导出
-**************************************/
-var classified = finalImage_selected.classify(classifier_sel);
-
+ * 8. 可视化与导出
+ **************************************/
 Map.centerObject(roi, 7);
-Map.addLayer(classified, {min:0, max:1, palette:['white', 'green']}, 'Bamboo_Map_Filtered');
+
+// 调色板映射新标签：0:白(背景), 1:亮绿(竹), 2:深绿(森), 3:黄(草)
+var exportPalette = ['#ffffff', '#27ae60', '#1a5e1a', '#f1c40f'];
+Map.addLayer(exportClassified, {min: 0, max: 3, palette: exportPalette}, 'Classification_0123');
 
 Export.image.toDrive({
-  image: classified.toByte(),
-  description: 'Bamboo_Analysis_Filtered_2024',
+  image: exportClassified,
+  description: 'Anhui_Bamboo_Forest_Grass_2024_0123',
   region: roi.geometry().bounds(),
   scale: 10,
-  maxPixels: 1e13
+  maxPixels: 1e13,
+  crs: 'EPSG:4326'
 });
 
 /**************************************
-* 11. 辅助分析
-**************************************/
-Map.addLayer(bamboo, {color: 'yellow'}, 'Bamboo Samples');
-Map.addLayer(forest, {color: 'white'}, 'Forest Samples');
+ * 9. WorldCover 可视化参考
+ **************************************/
+var wcPalette = ['006400','ffbb22','ffff4c','f096ff','fa0000','b4b4b4','f0f0f0','0064c8','0096a0','00cf75','fae6a0'];
+Map.addLayer(worldCover, {min: 10, max: 100, palette: wcPalette}, 'ESA WorldCover 2020', false);
+
+print('导出说明：0-背景, 1-竹林, 2-森林, 3-草地');
